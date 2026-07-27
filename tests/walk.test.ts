@@ -19,8 +19,12 @@ describe("walkDocument", () => {
   });
 
   it("represents a one-index inline image as exactly one placeholder character", () => {
-    const withImage = result.blocks.find((b) => b.inlineObjectIds?.includes("img-1"));
+    const withImage = result.blocks.find((b) =>
+      b.inlineObjectRefs?.some((ref) => ref.objectId === "img-1"),
+    );
     expect(withImage).toBeDefined();
+    // The image sits after "Ver ", so its placeholder occupies text offset 4.
+    expect(withImage!.inlineObjectRefs).toEqual([{ offset: 4, objectId: "img-1" }]);
     expect(withImage!.text).toBe(`Ver ${OBJECT_PLACEHOLDER} aquí`);
     // 4 + 1 + 5 = 10 characters, matching indices 25..35.
     expect(withImage!.text).toHaveLength(10);

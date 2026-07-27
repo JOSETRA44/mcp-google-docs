@@ -88,8 +88,15 @@ export interface Block {
   namedStyleType?: string;
   /** Set when this block carries or is covered by unresolved suggestions. */
   hasSuggestions?: boolean;
-  /** Object IDs of inline images contained in this block. */
-  inlineObjectIds?: string[];
+  /**
+   * Inline images in this block, each with the text offset of the placeholder standing in for it.
+   *
+   * The offset matters because a paragraph can hold several kinds of non-text element — an image,
+   * a footnote reference, a page break — and every one of them emits a placeholder. Without
+   * recording which placeholder belongs to which image, a paragraph mixing a footnote and an
+   * image renders the image in the footnote's position.
+   */
+  inlineObjectRefs?: { offset: number; objectId: string }[];
 }
 
 /**

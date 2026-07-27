@@ -258,7 +258,7 @@ class Walker {
     const range = this.rangeOf(element, context);
 
     let raw = "";
-    const inlineObjectIds: string[] = [];
+    const inlineObjectRefs: { offset: number; objectId: string }[] = [];
     let hasSuggestions = false;
 
     for (const child of paragraph.elements ?? []) {
@@ -273,7 +273,9 @@ class Walker {
       }
 
       if (child.inlineObjectElement?.inlineObjectId) {
-        inlineObjectIds.push(child.inlineObjectElement.inlineObjectId);
+        // `raw.length` is the offset the placeholder is about to occupy, which is exactly where
+        // the renderer must substitute this image back in.
+        inlineObjectRefs.push({ offset: raw.length, objectId: child.inlineObjectElement.inlineObjectId });
       }
 
       // Every other element type — images, breaks, footnote references, equations, person chips,
@@ -313,7 +315,7 @@ class Walker {
         : {}),
       ...(styleType ? { namedStyleType: styleType } : {}),
       ...(hasSuggestions ? { hasSuggestions } : {}),
-      ...(inlineObjectIds.length ? { inlineObjectIds } : {}),
+      ...(inlineObjectRefs.length ? { inlineObjectRefs } : {}),
     });
   }
 
