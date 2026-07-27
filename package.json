@@ -1,6 +1,6 @@
 {
   "name": "gdocs-native",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server that gives AI agents semantic, index-free control over Google Docs — read as markdown, edit by intent, collaborate safely under concurrent human edits",
   "type": "module",
   "license": "MIT",
