@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import { getGoogleClients } from "./clients.js";
 import { withRetry } from "./retry.js";
 
@@ -103,6 +104,103 @@ export async function findDocuments(
       }));
     },
     query ? `Could not search for documents matching "${query}"` : "Could not list documents",
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Asset hosting                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Upload bytes to Drive and return the new file's id.
+ *
+ * Files are created in the Drive root with a recognizable name, because the alternative — a file
+ * with an opaque name appearing in someone's Drive with no explanation — is worse than a
+ * momentary bit of clutter. The image pipeline deletes them again once the image is embedded.
+ */
+export async function uploadFile(
+  name: string,
+  mimeType: string,
+  body: Buffer,
+): Promise<string> {
+  const { drive } = await getGoogleClients();
+
+  return withRetry(
+    async () => {
+      const response = await drive.files.create({
+        requestBody: { name, mimeType },
+        media: { mimeType, body: Readable.from(body) },
+        fields: "id",
+      });
+      const id = response.data.id;
+      if (!id) throw new Error("Drive accepted the upload but returned no file id.");
+      return id;
+    },
+    `Could not upload "${name}" to Drive`,
+  );
+}
+
+/**
+ * Grant read access to anyone with the link, returning the permission id.
+ *
+ * This exists solely to let Google's own Docs servers fetch an image: `insertInlineImage` makes
+ * a server-side request with no credentials attached, so a private file is invisible to it no
+ * matter what the caller is authorized to do. The grant is meant to be revoked seconds later by
+ * the caller's `finally` block.
+ */
+export async function grantLinkAccess(fileId: string): Promise<string> {
+  const { drive } = await getGoogleClients();
+
+  return withRetry(
+    async () => {
+      const response = await drive.permissions.create({
+        fileId,
+        requestBody: { role: "reader", type: "anyone" },
+        fields: "id",
+      });
+      const id = response.data.id;
+      if (!id) throw new Error("Drive granted access but returned no permission id.");
+      return id;
+    },
+    `Could not share file ${fileId}`,
+  );
+}
+
+/** Revoke a permission. Never throws — used from cleanup paths that must not mask a real error. */
+export async function revokeAccess(fileId: string, permissionId: string): Promise<boolean> {
+  try {
+    const { drive } = await getGoogleClients();
+    await drive.permissions.delete({ fileId, permissionId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Delete a file. Never throws, for the same reason as `revokeAccess`. */
+export async function deleteFile(fileId: string): Promise<boolean> {
+  try {
+    const { drive } = await getGoogleClients();
+    await drive.files.delete({ fileId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Fetch a Drive file's bytes, used to validate an image that already lives in Drive. */
+export async function downloadFile(fileId: string): Promise<Buffer> {
+  const { drive } = await getGoogleClients();
+
+  return withRetry(
+    async () => {
+      const response = await drive.files.get(
+        { fileId, alt: "media" },
+        { responseType: "arraybuffer" },
+      );
+      return Buffer.from(response.data as unknown as ArrayBuffer);
+    },
+    `Could not download file ${fileId}`,
   );
 }
 
