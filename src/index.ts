@@ -99,6 +99,22 @@ program
       fail("Docs discovery", error instanceof Error ? error.message : String(error));
     }
 
+    // Drive and Docs are separate APIs that must each be enabled. Drive alone is enough to sign
+    // in and list files, so a project with only Drive enabled passes every check above and then
+    // fails on the first real edit. Reading a document is the cheapest way to prove Docs works.
+    try {
+      const [sample] = await findDocuments(undefined, 1);
+      if (!sample) {
+        console.log("  skip  Docs API — no document available to test against");
+      } else {
+        const { getDocument } = await import("./google/docs.js");
+        await getDocument(sample.id);
+        pass("Docs API", "reachable and enabled");
+      }
+    } catch (error) {
+      fail("Docs API", error instanceof Error ? error.message : String(error));
+    }
+
     console.log(failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) failed.\n`);
     if (failures > 0) process.exitCode = 1;
   });

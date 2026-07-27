@@ -4,7 +4,10 @@ import { exportMarkdown, findDocuments, getDocumentMetadata, listRevisions } fro
 import { createDocument } from "../google/docs.js";
 import { loadDocument } from "../core/document.js";
 import { renderMarkdown, renderOutline } from "../core/markdown/render.js";
-import { findTextMatches, resolveAddress } from "../core/address/resolve.js";
+import { findTextMatches, resolveAddress, type Address } from "../core/address/resolve.js";
+import { createComment, listComments, replyToComment } from "../google/comments.js";
+import { insertDocumentImage, type ImageSource } from "../core/assets/images.js";
+import { writeMarkdown } from "../core/markdown/write.js";
 import { mutate, type MutationOutcome } from "../core/mutate/executor.js";
 import {
   deleteBlock,
@@ -452,6 +455,50 @@ export function createServer(): McpServer {
   );
 
   server.registerTool(
+    "doc_write_markdown",
+    {
+      title: "Write Markdown into a Google Doc",
+      description:
+        "Insert a formatted section written in Markdown — headings, bold and italic, links, " +
+        "bulleted and numbered lists, tables, code, blockquotes and rules — and have it become " +
+        "real Google Docs formatting rather than literal asterisks. This is the tool for adding " +
+        "substantial structured content; use doc_insert for a single plain paragraph.",
+      inputSchema: {
+        document: documentField,
+        markdown: z.string().min(1).describe("The Markdown to write"),
+        position: z
+          .enum(["end", "start", "after"])
+          .default("end")
+          .describe("Where to write it. 'after' needs a target as well."),
+        ...addressFields,
+        mode: modeField,
+      },
+    },
+    guard(async (args) => {
+      const { document, markdown, position, mode, ...rest } = args;
+      const documentId = parseDocumentId(document);
+
+      const target: Address =
+        position === "after"
+          ? buildAddress(rest as AddressArgs)
+          : { kind: "position", at: position === "start" ? "start" : "end" };
+
+      const result = await writeMarkdown(documentId, markdown, {
+        position: target,
+        after: position === "after",
+        mode,
+      });
+
+      const parts = [
+        `Wrote ${result.insertedCharacters} characters of formatted content.`,
+        ...(result.tablesCreated > 0 ? [`Created ${result.tablesCreated} table(s).`] : []),
+        `Revision before: ${result.fromRevisionId}`,
+      ];
+      return textResult(parts.join("\n"));
+    }),
+  );
+
+  server.registerTool(
     "doc_insert_table",
     {
       title: "Insert a table into a Google Doc",
@@ -494,6 +541,168 @@ export function createServer(): McpServer {
           `Inserted a ${rows}x${columns} table. Read the document with format 'addressed' to get ` +
             `the cells' handles, then use doc_replace to fill them.`,
         ),
+      );
+    }),
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /* Assets                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  server.registerTool(
+    "doc_insert_image",
+    {
+      title: "Insert an image into a Google Doc",
+      description:
+        "Insert an image from a local file path, a public URL, or a file already in the user's " +
+        "Drive. Local and private Drive images are handled automatically — they are hosted " +
+        "briefly so Google can fetch them, then unshared and cleaned up. Accepts PNG, JPEG and " +
+        "GIF up to 50 MB and 25 megapixels.",
+      inputSchema: {
+        document: documentField,
+        file_path: z.string().optional().describe("Path to an image on this machine"),
+        url: z.string().optional().describe("Publicly reachable image URL"),
+        drive_file_id: z.string().optional().describe("ID of an image already in Drive"),
+        position: z.enum(["end", "start", "after"]).default("end"),
+        ...addressFields,
+        width_pt: z.number().min(1).optional().describe("Display width in points"),
+        height_pt: z.number().min(1).optional().describe("Display height in points"),
+        mode: modeField,
+      },
+    },
+    guard(async (args) => {
+      const { document, file_path, url, drive_file_id, position, width_pt, height_pt, mode, ...rest } =
+        args;
+      const documentId = parseDocumentId(document);
+
+      const sources = [
+        file_path !== undefined && "file_path",
+        url !== undefined && "url",
+        drive_file_id !== undefined && "drive_file_id",
+      ].filter(Boolean);
+
+      if (sources.length !== 1) {
+        throw new Error(
+          sources.length === 0
+            ? "Give the image as exactly one of file_path, url, or drive_file_id."
+            : `Give only one image source, but received ${sources.join(" and ")}.`,
+        );
+      }
+
+      const source: ImageSource = file_path
+        ? { kind: "file", path: file_path }
+        : url
+          ? { kind: "url", url }
+          : { kind: "drive", fileId: drive_file_id! };
+
+      const target: Address =
+        position === "after"
+          ? buildAddress(rest as AddressArgs)
+          : { kind: "position", at: position === "start" ? "start" : "end" };
+
+      const result = await insertDocumentImage(documentId, source, {
+        position: target,
+        after: position === "after",
+        mode,
+        ...(width_pt !== undefined ? { widthPt: width_pt } : {}),
+        ...(height_pt !== undefined ? { heightPt: height_pt } : {}),
+      });
+
+      const lines = ["Inserted the image."];
+      if (result.info) {
+        lines.push(`Source: ${result.info.width}x${result.info.height} ${result.info.format}.`);
+      }
+      if (result.usedTemporaryHosting) {
+        lines.push("It was hosted temporarily in Drive and has been removed again.");
+      }
+      if (result.cleanupWarning) lines.push(`Warning: ${result.cleanupWarning}`);
+      lines.push(`Revision before: ${result.fromRevisionId}`);
+      return textResult(lines.join("\n"));
+    }),
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /* Collaboration                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  server.registerTool(
+    "doc_comments_list",
+    {
+      title: "List comments on a Google Doc",
+      description:
+        "Read the comment threads on a document, including replies and the text each refers to. " +
+        "Use this to see what collaborators have asked for before editing.",
+      inputSchema: {
+        document: documentField,
+        include_resolved: z.boolean().default(false).describe("Include already-resolved threads"),
+        limit: z.number().int().min(1).max(100).default(50),
+      },
+    },
+    guard(async ({ document, include_resolved, limit }) => {
+      const comments = await listComments(parseDocumentId(document), {
+        includeResolved: include_resolved,
+        limit,
+      });
+
+      if (comments.length === 0) {
+        return textResult(
+          include_resolved ? "This document has no comments." : "No open comments on this document.",
+        );
+      }
+
+      const rendered = comments.map((c) => {
+        const head = `[${c.id}] ${c.author}${c.resolved ? " (resolved)" : ""}: ${c.content}`;
+        const quoted = c.quotedText ? `\n  on: "${c.quotedText.slice(0, 100)}"` : "";
+        const replies = c.replies
+          .map((r) => `\n  ↳ ${r.author}${r.action ? ` (${r.action})` : ""}: ${r.content}`)
+          .join("");
+        return head + quoted + replies;
+      });
+
+      return textResult(`${comments.length} comment thread(s):\n\n${rendered.join("\n\n")}`);
+    }),
+  );
+
+  server.registerTool(
+    "doc_comment",
+    {
+      title: "Comment on a Google Doc",
+      description:
+        "Add a new comment to a document. Note that comments created through the API attach to " +
+        "the document as a whole rather than highlighting a specific passage, so quote the text " +
+        "being discussed in the comment itself.",
+      inputSchema: {
+        document: documentField,
+        content: z.string().min(1).describe("The comment text"),
+      },
+    },
+    guard(async ({ document, content }) => {
+      const comment = await createComment(parseDocumentId(document), content);
+      return textResult(`Added comment [${comment.id}].`);
+    }),
+  );
+
+  server.registerTool(
+    "doc_comment_reply",
+    {
+      title: "Reply to a comment on a Google Doc",
+      description:
+        "Reply to an existing comment thread, optionally resolving or reopening it. Get thread " +
+        "IDs from doc_comments_list.",
+      inputSchema: {
+        document: documentField,
+        comment_id: z.string().describe("Thread ID from doc_comments_list"),
+        content: z.string().min(1).describe("The reply text"),
+        action: z
+          .enum(["resolve", "reopen"])
+          .optional()
+          .describe("Also close or reopen the thread"),
+      },
+    },
+    guard(async ({ document, comment_id, content, action }) => {
+      await replyToComment(parseDocumentId(document), comment_id, content, action);
+      return textResult(
+        action ? `Replied and marked the thread ${action}d.` : "Replied to the thread.",
       );
     }),
   );

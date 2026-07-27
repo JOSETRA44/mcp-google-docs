@@ -28,6 +28,8 @@ export type ErrorKind =
   | "invalid_request"
   /** The feature requires Developer Preview enrollment this account does not have. */
   | "preview_required"
+  /** The API itself is not enabled on the Cloud project backing these credentials. */
+  | "api_disabled"
   /** Anything unclassified. */
   | "unknown";
 
@@ -169,6 +171,22 @@ export function normalizeGoogleError(error: unknown, context: string): GoogleApi
   if (status === 403) {
     if (reason && TRANSIENT_REASONS.has(reason)) {
       return build("transient", `rate limited (${reason}).`);
+    }
+    // A disabled API and a genuine permission problem are both 403, and mistaking one for the
+    // other sends the user to fix access on a document when the real fix is one click in the
+    // Cloud console. Google flags this case explicitly, so it is worth checking first.
+    if (
+      reason === "accessNotConfigured" ||
+      raw.response?.data?.error?.status === "PERMISSION_DENIED" &&
+        /has not been used in project|is disabled/i.test(apiMessage)
+    ) {
+      const api = /\/apis\/api\/([a-z.]+)/i.exec(apiMessage)?.[1];
+      return build(
+        "api_disabled",
+        `the ${api ?? "required"} API is not enabled on the Google Cloud project behind these ` +
+          `credentials. Enable it in the Cloud console, wait a minute for it to propagate, then ` +
+          `retry.\n\nOriginal message: ${apiMessage}`,
+      );
     }
     if (reason && SCOPE_REASONS.has(reason)) {
       return build(

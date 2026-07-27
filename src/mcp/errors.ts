@@ -1,5 +1,8 @@
 import { GoogleApiError } from "../google/errors.js";
 import { NotAuthenticatedError } from "../google/clients.js";
+import { PreviewUnavailableError } from "../google/capabilities.js";
+import { ImageValidationError } from "../core/assets/image-info.js";
+import { AddressError } from "../core/address/resolve.js";
 import { AuthConfigError } from "../auth/store.js";
 
 /**
@@ -30,7 +33,16 @@ export function errorResult(text: string): ToolResult {
  * it — otherwise the agent's only recovery strategy is to retry the identical call forever.
  */
 export function toToolError(error: unknown): ToolResult {
-  if (error instanceof NotAuthenticatedError || error instanceof AuthConfigError) {
+  // These carry messages written for the reader already — an address that matched nothing and
+  // lists the near misses, an image that breaks a documented limit, a feature needing enrollment.
+  // Wrapping them in further explanation would only bury the part that matters.
+  if (
+    error instanceof NotAuthenticatedError ||
+    error instanceof AuthConfigError ||
+    error instanceof PreviewUnavailableError ||
+    error instanceof ImageValidationError ||
+    error instanceof AddressError
+  ) {
     return errorResult(error.message);
   }
 
@@ -53,6 +65,10 @@ export function toToolError(error: unknown): ToolResult {
           `${error.message}\nCheck the document ID. A Docs URL looks like ` +
             `https://docs.google.com/document/d/DOCUMENT_ID/edit — the ID is the segment after /d/.`,
         );
+      case "api_disabled":
+        // Nothing the agent can do about this one, and no amount of retrying will help — the
+        // message is written to be relayed to the user verbatim.
+        return errorResult(error.message);
       case "preview_required":
         return errorResult(
           `${error.message}\nThis feature needs Google Workspace Developer Preview enrollment: ` +
