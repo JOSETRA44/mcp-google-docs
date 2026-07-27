@@ -3,6 +3,7 @@ import type { ParsedDocument } from "../ast/types.js";
 import { loadDocument } from "../document.js";
 import { batchUpdate, type WriteMode } from "../../google/docs.js";
 import { isRevisionConflict } from "../../google/errors.js";
+import { withCapability } from "../../google/capabilities.js";
 import { ensureStateDir, mutationLogPath } from "../../config/paths.js";
 import { orderRequests, type PlannedRequest } from "./plan.js";
 
@@ -117,11 +118,20 @@ export async function mutate(
     }
 
     try {
-      const result = await batchUpdate(documentId, orderRequests(planned), {
-        targetRevisionId: document.revisionId,
-        ...(options.strict !== undefined ? { strict: options.strict } : {}),
-        ...(options.mode !== undefined ? { mode: options.mode } : {}),
-      });
+      const write = () =>
+        batchUpdate(documentId, orderRequests(planned), {
+          targetRevisionId: document.revisionId,
+          ...(options.strict !== undefined ? { strict: options.strict } : {}),
+          ...(options.mode !== undefined ? { mode: options.mode } : {}),
+        });
+
+      // Suggestion mode is a Developer Preview feature. There is deliberately no fallback: an
+      // agent that asked for a reviewable suggestion and silently got a committed edit instead
+      // would have made an irreversible change the user never approved.
+      const result =
+        options.mode === "suggest"
+          ? await withCapability("suggestMode", "Writing as a tracked suggestion", write)
+          : await write();
 
       const outcome: MutationOutcome = {
         documentId,

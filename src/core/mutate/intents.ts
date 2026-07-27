@@ -19,6 +19,8 @@ export interface TextFormat {
   fontSize?: number;
   /** Hyperlink target; pass null-ish to clear. */
   link?: string;
+  /** Font family, e.g. "Courier New" for code. */
+  fontFamily?: string;
 }
 
 /**
@@ -141,6 +143,12 @@ export function formatRange(range: DocRange, format: TextFormat): PlannedRequest
   if (format.link !== undefined) {
     textStyle.link = format.link ? { url: format.link } : {};
     fields.push("link");
+  }
+  if (format.fontFamily !== undefined) {
+    // `weightedFontFamily` rather than a bare family name, because Docs stores weight alongside
+    // the face; setting the family without a weight resets bold on the range.
+    textStyle.weightedFontFamily = { fontFamily: format.fontFamily };
+    fields.push("weightedFontFamily");
   }
 
   if (fields.length === 0) return [];
