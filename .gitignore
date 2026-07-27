@@ -1,0 +1,42 @@
+# Dependencias
+node_modules/
+
+# Directorios de compilación (tsup)
+dist/
+build/
+out/
+
+# Variables de entorno y Secretos (¡CRÍTICO PARA GOOGLE!)
+.env
+.env.*
+*.local
+credentials.json
+token.json
+tokens.json
+client_secret*.json
+client_id.json
+
+# Archivos de caché y temporales de TypeScript/Herramientas
+.tsbuildinfo
+.eslintcache
+.vite/
+coverage/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Sistema Operativo y Editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
