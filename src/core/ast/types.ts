@@ -58,7 +58,10 @@ export interface Block {
    */
   id: string;
   kind: BlockKind;
-  /** Plain text with Docs' control characters normalized away. May be empty for image blocks. */
+  /**
+   * Plain text with the trailing paragraph mark removed. This is what gets matched against and
+   * what gets shown to the agent.
+   */
   text: string;
   /** Heading level 1-6, only for `kind === "heading"`. */
   level?: number;
@@ -66,7 +69,20 @@ export interface Block {
   listDepth?: number;
   /** True when the list item is ordered (numbered) rather than bulleted. */
   ordered?: boolean;
+  /**
+   * The whole structural element, *including* the trailing paragraph mark.
+   * Deleting this range removes the paragraph itself.
+   */
   range: DocRange;
+  /**
+   * Just the text, *excluding* the trailing paragraph mark.
+   *
+   * Both ranges exist because picking the wrong one is the single most common way to mangle a
+   * Docs edit: replacing text over `range` swallows the paragraph break and silently merges the
+   * block with the one after it. Rewriting a block's text uses `textRange`; removing the block
+   * entirely uses `range`.
+   */
+  textRange: DocRange;
   path: BlockPath;
   /** Named style, e.g. "HEADING_1", "NORMAL_TEXT", "TITLE". */
   namedStyleType?: string;
@@ -76,15 +92,42 @@ export interface Block {
   inlineObjectIds?: string[];
 }
 
+/**
+ * A block as produced by the AST walk, before an identity has been assigned.
+ *
+ * The walk knows structure and position; it does not know how to name things. Deriving a stable
+ * id needs a view of the whole document at once, because identical text in two places has to be
+ * disambiguated by ordinal. Keeping that a separate step means the walk stays a pure structural
+ * transform and the naming scheme can change without touching it.
+ */
+export type RawBlock = Omit<Block, "id">;
+
 /** A table, kept alongside blocks because tables need structural (not textual) addressing. */
+/** One cell. A cell holds a sequence of blocks, not a single string — cells can hold paragraphs,
+ *  lists, even nested tables. */
+export interface TableCellInfo<Ref> {
+  range: DocRange;
+  /** The blocks living inside this cell, in document order. */
+  blocks: Ref[];
+}
+
 export interface TableInfo {
   id: string;
   range: DocRange;
   rows: number;
   columns: number;
   path: BlockPath;
-  /** Block IDs of every cell, in row-major order. */
-  cellBlockIds: string[][];
+  /** Cells in row-major order; `cells[row][column]`. */
+  cells: TableCellInfo<string>[][];
+}
+
+/** A table as produced by the walk: cells reference blocks by array index, not by id. */
+export interface RawTableInfo {
+  range: DocRange;
+  rows: number;
+  columns: number;
+  path: BlockPath;
+  cells: TableCellInfo<number>[][];
 }
 
 /** One tab of a document, including nested child tabs flattened by depth-first ordinal. */

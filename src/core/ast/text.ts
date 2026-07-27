@@ -110,7 +110,8 @@ export function normalizeWithMap(raw: string, options: NormalizeOptions = {}): N
 
   const out: string[] = [];
   const map: number[] = [];
-  let pendingWhitespace = false;
+  /** Raw offset where the current run of whitespace began, or -1 when not in a run. */
+  let whitespaceStart = -1;
 
   for (let i = 0; i < raw.length; i++) {
     const ch = raw[i]!;
@@ -122,16 +123,21 @@ export function normalizeWithMap(raw: string, options: NormalizeOptions = {}): N
     if (collapseWhitespace && /\s/.test(folded)) {
       // Defer whitespace so a run collapses into at most one space, and so trailing
       // whitespace never makes it into the output at all.
-      pendingWhitespace = true;
+      if (whitespaceStart === -1) whitespaceStart = i;
       continue;
     }
 
-    if (pendingWhitespace) {
-      pendingWhitespace = false;
+    if (whitespaceStart !== -1) {
+      const runStart = whitespaceStart;
+      whitespaceStart = -1;
       // Leading whitespace is dropped rather than emitted, which trims the string for free.
       if (out.length > 0) {
         out.push(" ");
-        map.push(i);
+        // The collapsed space must map to where the whitespace run *started*, not to the
+        // character after it. Mapping forward makes an exclusive end offset that lands on this
+        // space resolve past the whitespace, so a match ending just before a space silently
+        // swallows it.
+        map.push(runStart);
       }
     }
 
