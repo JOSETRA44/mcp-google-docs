@@ -1,9 +1,18 @@
 {
   "name": "gdocs-native",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "MCP server that gives AI agents semantic, index-free control over Google Docs — read as markdown, edit by intent, collaborate safely under concurrent human edits",
   "type": "module",
   "license": "MIT",
+  "author": "JOSETRA44",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JOSETRA44/mcp-google-docs.git"
+  },
+  "homepage": "https://github.com/JOSETRA44/mcp-google-docs#readme",
+  "bugs": {
+    "url": "https://github.com/JOSETRA44/mcp-google-docs/issues"
+  },
   "engines": {
     "node": ">=20"
   },
@@ -19,9 +28,12 @@
     "mcp",
     "model-context-protocol",
     "google-docs",
+    "google-drive",
     "ai-agents",
     "markdown",
-    "claude"
+    "claude",
+    "cursor",
+    "llm-tools"
   ],
   "scripts": {
     "build": "tsup",

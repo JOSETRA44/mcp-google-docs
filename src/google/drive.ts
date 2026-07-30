@@ -107,6 +107,81 @@ export async function findDocuments(
   );
 }
 
+/** MIME types Drive can convert into a native Google Doc. */
+const CONVERTIBLE_TO_DOC = new Set([
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "application/msword", // .doc
+  "application/rtf",
+  "text/rtf",
+  "text/plain",
+  "text/markdown",
+  "text/html",
+  "application/vnd.oasis.opendocument.text", // .odt
+]);
+
+export interface ConversionResult {
+  documentId: string;
+  name: string;
+  webViewLink: string | undefined;
+  /** MIME type of the source file, for reporting. */
+  sourceMimeType: string;
+}
+
+/**
+ * Convert an uploaded file into a native Google Doc.
+ *
+ * Implemented as a *copy* rather than an in-place conversion, because Drive offers no in-place
+ * option and because destroying someone's original during a format change would be an
+ * unreasonable thing for a tool to do on its own. The source is left exactly as it was.
+ *
+ * This is the only route by which the rest of this server can touch a `.docx`: the Docs API
+ * refuses Office files outright, so without conversion there is nothing to address, read or edit.
+ */
+export async function convertToGoogleDoc(
+  fileId: string,
+  newName?: string,
+): Promise<ConversionResult> {
+  const { drive } = await getGoogleClients();
+
+  return withRetry(
+    async () => {
+      const source = await drive.files.get({ fileId, fields: "name,mimeType" });
+      const sourceMimeType = source.data.mimeType ?? "unknown";
+
+      if (sourceMimeType === DOC_MIME) {
+        throw new Error("That file is already a native Google Doc; no conversion is needed.");
+      }
+      if (!CONVERTIBLE_TO_DOC.has(sourceMimeType)) {
+        throw new Error(
+          `Drive cannot convert "${sourceMimeType}" into a Google Doc. ` +
+            `Convertible formats are .docx, .doc, .odt, .rtf, .txt, .md and .html.`,
+        );
+      }
+
+      const baseName = source.data.name ?? "document";
+      const stripped = baseName.replace(/\.(docx?|odt|rtf|txt|md|html?)$/i, "");
+
+      const copy = await drive.files.copy({
+        fileId,
+        // Naming the target MIME type is what makes Drive convert rather than duplicate.
+        requestBody: { name: newName ?? `${stripped} (Google Docs)`, mimeType: DOC_MIME },
+        fields: "id,name,webViewLink",
+      });
+
+      const documentId = copy.data.id;
+      if (!documentId) throw new Error("Drive converted the file but returned no id.");
+
+      return {
+        documentId,
+        name: copy.data.name ?? stripped,
+        webViewLink: copy.data.webViewLink ?? undefined,
+        sourceMimeType,
+      };
+    },
+    `Could not convert file ${fileId} to a Google Doc`,
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Asset hosting                                                               */
 /* -------------------------------------------------------------------------- */

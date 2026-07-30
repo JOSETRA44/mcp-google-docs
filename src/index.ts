@@ -1,10 +1,18 @@
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { authorize } from "./auth/oauth.js";
+import {
+  defaultEntry,
+  installAll,
+  SERVER_NAME,
+  uninstallAll,
+  type InstallOutcome,
+} from "./install/install.js";
 import { clearTokens, loadClientCredentials, loadTokens } from "./auth/store.js";
 import { ALL_SCOPES } from "./auth/scopes.js";
 import { getGoogleClients, resetGoogleClients } from "./google/clients.js";
 import { findDocuments } from "./google/drive.js";
-import { stateDir } from "./config/paths.js";
+import { credentialsPath, ensureStateDir, stateDir } from "./config/paths.js";
 
 /**
  * Command-line entry point.
@@ -23,7 +31,21 @@ program
   .command("auth")
   .description("Sign in to Google and store credentials for the MCP server")
   .option("--no-open", "print the authorization URL instead of launching a browser")
-  .action(async (options: { open: boolean }) => {
+  .option(
+    "-c, --credentials <path>",
+    "path to the OAuth client JSON downloaded from Google Cloud Console",
+  )
+  .action(async (options: { open: boolean; credentials?: string }) => {
+    // Accepting the downloaded file wherever it landed removes the one step users reliably get
+    // wrong: knowing that it belongs at a specific path under a dot-directory they have never
+    // opened.
+    if (options.credentials) {
+      const { copyFile } = await import("node:fs/promises");
+      await ensureStateDir();
+      await copyFile(options.credentials, credentialsPath());
+      console.log(`Stored OAuth client from ${options.credentials}`);
+    }
+
     await authorize({ openBrowser: options.open });
     resetGoogleClients();
     const { drive } = await getGoogleClients();
@@ -134,6 +156,110 @@ program
       const when = doc.modifiedTime?.slice(0, 10) ?? "          ";
       console.log(`${when}  ${doc.id}  ${doc.name}`);
     }
+  });
+
+const STATUS_LABEL: Record<string, string> = {
+  installed: "added",
+  updated: "updated",
+  unchanged: "already configured",
+  removed: "removed",
+  absent: "not detected",
+  unparsable: "SKIPPED",
+  failed: "FAILED",
+};
+
+function reportOutcomes(outcomes: InstallOutcome[]): number {
+  let changed = 0;
+  for (const outcome of outcomes) {
+    if (outcome.status === "absent") continue;
+    const label = STATUS_LABEL[outcome.status] ?? outcome.status;
+    console.log(`  ${label.padEnd(18)} ${outcome.client.label}`);
+    if (outcome.detail) console.log(`  ${"".padEnd(18)} ${outcome.detail}`);
+    if (["installed", "updated", "removed"].includes(outcome.status)) changed++;
+  }
+
+  const undetected = outcomes.filter((o) => o.status === "absent");
+  if (undetected.length > 0) {
+    console.log(`\n  Not detected: ${undetected.map((o) => o.client.label).join(", ")}`);
+    console.log(`  Install into one anyway with: gdocs-native install --client <id>`);
+  }
+  return changed;
+}
+
+program
+  .command("install")
+  .description("Register this server with every MCP client found on this machine")
+  .option("-c, --client <ids...>", "only these clients (claude-code, claude-desktop, cursor, windsurf, vscode, cline)")
+  .option("--local", "point clients at this checkout instead of the published package")
+  .option("--dry-run", "show what would change without writing anything")
+  .action(async (options: { client?: string[]; local?: boolean; dryRun?: boolean }) => {
+    // A local checkout is registered by absolute path to its built entry point, which is what a
+    // contributor testing their own changes needs; everyone else gets the published package.
+    const entry = options.local
+      ? { command: process.execPath, args: [fileURLToPath(new URL("index.js", import.meta.url)), "mcp"] }
+      : defaultEntry();
+
+    console.log(`\nRegistering "${SERVER_NAME}" as: ${entry.command} ${entry.args.join(" ")}\n`);
+
+    const outcomes = await installAll({
+      ...(options.client ? { clientIds: options.client } : {}),
+      entry,
+      dryRun: options.dryRun ?? false,
+    });
+    const changed = reportOutcomes(outcomes);
+
+    if (options.dryRun) {
+      console.log("\nDry run — nothing was written.\n");
+      return;
+    }
+
+    if (changed > 0) {
+      console.log("\nRestart the affected clients to pick this up:");
+      for (const outcome of outcomes) {
+        if (["installed", "updated"].includes(outcome.status)) {
+          console.log(`  ${outcome.client.label}: ${outcome.client.restartHint}`);
+        }
+      }
+    }
+
+    const tokens = await loadTokens();
+    console.log(
+      tokens?.refresh_token
+        ? "\nAlready signed in. You're ready to go.\n"
+        : "\nNext: run `gdocs-native auth` to connect your Google account.\n",
+    );
+  });
+
+program
+  .command("uninstall")
+  .description("Remove this server from every MCP client config")
+  .option("--dry-run", "show what would change without writing anything")
+  .action(async (options: { dryRun?: boolean }) => {
+    console.log("");
+    reportOutcomes(await uninstallAll({ dryRun: options.dryRun ?? false }));
+    console.log("");
+  });
+
+program
+  .command("setup")
+  .description("Do everything at once: register with MCP clients, then sign in to Google")
+  .action(async () => {
+    console.log(`\nRegistering "${SERVER_NAME}" with detected MCP clients...\n`);
+    reportOutcomes(await installAll({ entry: defaultEntry() }));
+
+    const tokens = await loadTokens();
+    if (tokens?.refresh_token) {
+      console.log("\nAlready signed in to Google.\n");
+    } else {
+      console.log("\nOpening your browser to sign in to Google...\n");
+      await authorize({ openBrowser: true });
+      resetGoogleClients();
+    }
+
+    const { drive } = await getGoogleClients();
+    const about = await drive.about.get({ fields: "user(emailAddress)" });
+    console.log(`\nReady. Signed in as ${about.data.user?.emailAddress ?? "unknown"}.`);
+    console.log("Restart your MCP client and ask it to list your Google Docs.\n");
   });
 
 program

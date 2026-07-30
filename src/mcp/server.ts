@@ -6,6 +6,7 @@ import { loadDocument } from "../core/document.js";
 import { renderMarkdown, renderOutline } from "../core/markdown/render.js";
 import { findTextMatches, resolveAddress, type Address } from "../core/address/resolve.js";
 import { createComment, listComments, replyToComment } from "../google/comments.js";
+import { convertToGoogleDoc } from "../google/drive.js";
 import { insertDocumentImage, type ImageSource } from "../core/assets/images.js";
 import { writeMarkdown } from "../core/markdown/write.js";
 import { mutate, type MutationOutcome } from "../core/mutate/executor.js";
@@ -108,6 +109,32 @@ export function createServer(): McpServer {
       const id = await createDocument(title);
       return textResult(
         `Created "${title}".\nid: ${id}\nurl: https://docs.google.com/document/d/${id}/edit`,
+      );
+    }),
+  );
+
+  server.registerTool(
+    "doc_convert",
+    {
+      title: "Convert an uploaded file to a Google Doc",
+      description:
+        "Convert a .docx, .doc, .odt, .rtf, .txt, .md or .html file in Drive into a native " +
+        "Google Doc, and return the new document's ID. Use this when another tool reports that " +
+        "a file is an Office document — the Docs API cannot read or edit those. The original " +
+        "file is left untouched; this creates a converted copy.",
+      inputSchema: {
+        file: z.string().describe("Drive file ID or URL of the file to convert"),
+        name: z.string().optional().describe("Name for the converted document"),
+      },
+    },
+    guard(async ({ file, name }) => {
+      const fileId = parseDocumentId(file);
+      const result = await convertToGoogleDoc(fileId, name);
+      return textResult(
+        `Converted "${result.name}" from ${result.sourceMimeType} to a Google Doc.\n` +
+          `id: ${result.documentId}\n` +
+          `url: https://docs.google.com/document/d/${result.documentId}/edit\n` +
+          `The original file was not modified.`,
       );
     }),
   );
@@ -284,11 +311,19 @@ export function createServer(): McpServer {
           .default("end")
           .describe("Where to insert. 'after' and 'before' need a target as well."),
         ...addressFields,
+        match_style: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Keep the neighbouring paragraph's formatting instead of inserting plain body text. " +
+              "Use this when extending a run of similarly formatted paragraphs — another entry " +
+              "in a reference list, another line of an address — so the new one does not stand out.",
+          ),
         mode: modeField,
       },
     },
     guard(async (args) => {
-      const { document, text, position, mode, ...rest } = args;
+      const { document, text, position, match_style, mode, ...rest } = args;
       const documentId = parseDocumentId(document);
       const addressArgs = rest as AddressArgs;
       const needsTarget = position === "after" || position === "before";
@@ -308,9 +343,10 @@ export function createServer(): McpServer {
           if (!found.block) return insertAt(found.range, text);
 
           const before = position === "start" || position === "before";
+          const opts = { inheritStyle: match_style };
           return before
-            ? insertParagraphBefore(found.block, text)
-            : insertParagraphAfter(found.block, text);
+            ? insertParagraphBefore(found.block, text, opts)
+            : insertParagraphAfter(found.block, text, opts);
         },
         { mode, description: `insert into ${documentId}` },
       );

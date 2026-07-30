@@ -103,7 +103,23 @@ function normalizeInsertedParagraph(
  * The newline is written *before* the text so that the target block keeps its own paragraph mark
  * and the new content becomes a paragraph of its own.
  */
-export function insertParagraphAfter(block: Block, text: string): PlannedRequest[] {
+export interface InsertParagraphOptions {
+  /**
+   * Keep the neighbouring paragraph's formatting instead of resetting to body text.
+   *
+   * Inheritance is usually unwanted — it is what turns a paragraph added after a heading into
+   * another heading. But it is exactly right when extending a run of similarly formatted
+   * paragraphs: one more entry in a reference list with a hanging indent, one more line of an
+   * address block. Resetting there would make the new entry the only one that looks wrong.
+   */
+  inheritStyle?: boolean;
+}
+
+export function insertParagraphAfter(
+  block: Block,
+  text: string,
+  options: InsertParagraphOptions = {},
+): PlannedRequest[] {
   const index = block.textRange.endIndex;
   // After the insert, the newline occupies `index` and the text runs from `index + 1`.
   const inserted: DocRange = {
@@ -117,12 +133,16 @@ export function insertParagraphAfter(block: Block, text: string): PlannedRequest
     at(index, {
       insertText: { location: toApiLocation(block.textRange, index), text: `\n${text}` },
     }),
-    ...normalizeInsertedParagraph(inserted, block),
+    ...(options.inheritStyle ? [] : normalizeInsertedParagraph(inserted, block)),
   ];
 }
 
-/** Insert a new paragraph before a block, as ordinary body text. */
-export function insertParagraphBefore(block: Block, text: string): PlannedRequest[] {
+/** Insert a new paragraph before a block. */
+export function insertParagraphBefore(
+  block: Block,
+  text: string,
+  options: InsertParagraphOptions = {},
+): PlannedRequest[] {
   const index = block.range.startIndex;
   const inserted: DocRange = {
     startIndex: index,
@@ -135,7 +155,7 @@ export function insertParagraphBefore(block: Block, text: string): PlannedReques
     at(index, {
       insertText: { location: toApiLocation(block.range, index), text: `${text}\n` },
     }),
-    ...normalizeInsertedParagraph(inserted, block),
+    ...(options.inheritStyle ? [] : normalizeInsertedParagraph(inserted, block)),
   ];
 }
 
