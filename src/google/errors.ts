@@ -30,6 +30,11 @@ export type ErrorKind =
   | "preview_required"
   /** The API itself is not enabled on the Cloud project backing these credentials. */
   | "api_disabled"
+  /**
+   * The file is an uploaded Office document (.docx and friends) rather than a native Google Doc.
+   * Drive stores and displays it, but the Docs API cannot read or edit it at all.
+   */
+  | "office_file"
   /** Anything unclassified. */
   | "unknown";
 
@@ -140,6 +145,26 @@ export function normalizeGoogleError(error: unknown, context: string): GoogleApi
       retryAfterSeconds,
       cause: error,
     });
+
+  // An uploaded Office file reports itself through two different statuses depending on which API
+  // was asked — a 400 from Docs, a 403 from Drive's exporter — so the check comes before both.
+  // Reading it as a permission problem sends the user hunting for access they already have.
+  if (
+    reason === "fileNotExportable" ||
+    /must not be an Office file|only supports Docs Editors files/i.test(apiMessage)
+  ) {
+    return new GoogleApiError({
+      kind: "office_file",
+      message:
+        `${context}: this file is an uploaded Office document (.docx), not a native Google Doc. ` +
+        `The Google Docs API cannot read or edit Office files — Drive only stores and displays ` +
+        `them.\n\nConvert it to a Google Doc first; that leaves the original untouched and ` +
+        `produces an editable copy.`,
+      status: Number.isFinite(status) ? status : undefined,
+      reason,
+      cause: error,
+    });
+  }
 
   if (status === 400) {
     // Google signals both a stale `requiredRevisionId` and a too-old `targetRevisionId` as a
