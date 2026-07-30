@@ -297,17 +297,20 @@ export function createServer(): McpServer {
       const outcome = await mutate(
         documentId,
         (doc) => {
-          if (!address) {
-            const anchor = resolveAddress(doc, { kind: "position", at: position === "start" ? "start" : "end" });
-            return insertAt(anchor.range, position === "start" ? `${text}\n` : `\n${text}`);
-          }
-          const found = resolveAddress(doc, address);
-          if (!found.block) {
-            return insertAt(found.range, `\n${text}`);
-          }
-          return position === "after"
-            ? insertParagraphAfter(found.block, text)
-            : insertParagraphBefore(found.block, text);
+          const found = resolveAddress(
+            doc,
+            address ?? { kind: "position", at: position === "start" ? "start" : "end" },
+          );
+
+          // Only a document with no blocks at all has nowhere to anchor against; everywhere else
+          // the neighbouring block is what lets the new paragraph shed the style it would
+          // otherwise inherit.
+          if (!found.block) return insertAt(found.range, text);
+
+          const before = position === "start" || position === "before";
+          return before
+            ? insertParagraphBefore(found.block, text)
+            : insertParagraphAfter(found.block, text);
         },
         { mode, description: `insert into ${documentId}` },
       );

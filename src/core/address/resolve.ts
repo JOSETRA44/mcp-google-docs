@@ -159,33 +159,68 @@ export function findTextMatches(document: ParsedDocument, query: string): TextMa
 /* Address resolution                                                          */
 /* -------------------------------------------------------------------------- */
 
-function endOfBody(document: ParsedDocument, tabId: string | undefined): DocRange {
+/**
+ * Body blocks of one tab that can actually anchor an insertion, in document order.
+ *
+ * Structural markers are excluded. Every Docs body opens with a `sectionBreak` occupying index 0,
+ * and index 0 is not addressable — inserting there is rejected outright with "the insertion index
+ * must be inside the bounds of an existing paragraph". Treating it as the first block makes every
+ * insert-at-start fail.
+ */
+function bodyBlocks(document: ParsedDocument, tabId: string | undefined): Block[] {
   const targetTab = tabId ?? document.tabs[0]?.tabId ?? "";
-  const inTab = document.blocks.filter((b) => b.range.tabId === targetTab && b.range.segmentId === "");
-  const last = inTab[inTab.length - 1];
-  // Docs reserves index 0; a document's body always begins at 1.
-  const index = last ? last.range.endIndex - 1 : 1;
-  return { startIndex: index, endIndex: index, segmentId: "", tabId: targetTab };
+  return document.blocks.filter(
+    (b) =>
+      b.range.tabId === targetTab &&
+      b.range.segmentId === "" &&
+      b.kind !== "sectionBreak" &&
+      b.range.startIndex >= 1,
+  );
 }
 
-function startOfBody(document: ParsedDocument, tabId: string | undefined): DocRange {
+/**
+ * The end of a tab's body, together with the block that sits there.
+ *
+ * The block matters as much as the position: inserting a paragraph inherits the surrounding
+ * paragraph's style, so callers need the neighbour in order to undo that inheritance. Returning
+ * only a bare index is what let an inserted paragraph silently become a heading.
+ */
+function endOfBody(
+  document: ParsedDocument,
+  tabId: string | undefined,
+): { range: DocRange; block: Block | undefined } {
   const targetTab = tabId ?? document.tabs[0]?.tabId ?? "";
-  return { startIndex: 1, endIndex: 1, segmentId: "", tabId: targetTab };
+  const blocks = bodyBlocks(document, tabId);
+  const last = blocks[blocks.length - 1];
+  // Docs reserves index 0; a document's body always begins at 1.
+  const index = last ? last.range.endIndex - 1 : 1;
+  return {
+    range: { startIndex: index, endIndex: index, segmentId: "", tabId: targetTab },
+    block: last,
+  };
+}
+
+function startOfBody(
+  document: ParsedDocument,
+  tabId: string | undefined,
+): { range: DocRange; block: Block | undefined } {
+  const targetTab = tabId ?? document.tabs[0]?.tabId ?? "";
+  return {
+    range: { startIndex: 1, endIndex: 1, segmentId: "", tabId: targetTab },
+    block: bodyBlocks(document, tabId)[0],
+  };
 }
 
 /** Resolve an address against a freshly-read document. */
 export function resolveAddress(document: ParsedDocument, address: Address): Resolution {
   switch (address.kind) {
-    case "position":
-      return {
-        block: undefined,
-        range:
-          address.at === "start"
-            ? startOfBody(document, address.tabId)
-            : endOfBody(document, address.tabId),
-        method: "position",
-        confidence: 1,
-      };
+    case "position": {
+      const edge =
+        address.at === "start"
+          ? startOfBody(document, address.tabId)
+          : endOfBody(document, address.tabId);
+      return { block: edge.block, range: edge.range, method: "position", confidence: 1 };
+    }
 
     case "anchor": {
       const ranges = document.namedRanges[address.name];

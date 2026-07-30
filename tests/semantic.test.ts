@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseDocument } from "../src/core/document.js";
 import { AddressError, findTextMatches, resolveAddress, similarity } from "../src/core/address/resolve.js";
 import { renderMarkdown, renderOutline } from "../src/core/markdown/render.js";
-import { replaceRange } from "../src/core/mutate/intents.js";
+import { insertParagraphAfter, replaceRange } from "../src/core/mutate/intents.js";
 import { orderRequests, at } from "../src/core/mutate/plan.js";
 import { sampleDocument } from "./fixtures/sample-document.js";
 
@@ -161,6 +161,40 @@ describe("request ordering", () => {
     const ordered = orderRequests(requests);
     expect(ordered[0]!.deleteContentRange).toBeDefined();
     expect(ordered[1]!.insertText?.text).toBe("Conclusiones");
+  });
+
+  it("resets an inserted paragraph so it does not inherit the target's style", () => {
+    // Regression: inserting after a heading used to produce another heading. Paragraph style is
+    // inherited no matter which side of the paragraph mark the text goes, so it must be reset.
+    const heading = doc.blocks.find((b) => b.text === "Resultados")!;
+    const requests = insertParagraphAfter(heading, "nuevo párrafo");
+
+    const style = requests.find((r) => r.request.updateParagraphStyle)!;
+    expect(style.request.updateParagraphStyle!.paragraphStyle!.namedStyleType).toBe("NORMAL_TEXT");
+
+    // The reset must cover exactly the inserted text: it begins one index past the newline.
+    const insertIndex = heading.textRange.endIndex;
+    expect(style.request.updateParagraphStyle!.range).toMatchObject({
+      startIndex: insertIndex + 1,
+      endIndex: insertIndex + 1 + "nuevo párrafo".length,
+    });
+
+    // And it must run after the insert that created the text it styles.
+    const ordered = orderRequests(requests);
+    expect(ordered[0]!.insertText).toBeDefined();
+    expect(ordered[1]!.updateParagraphStyle).toBeDefined();
+  });
+
+  it("clears bullets only when inserting after a list item", () => {
+    const listItem = doc.blocks.find((b) => b.kind === "listItem")!;
+    const afterList = insertParagraphAfter(listItem, "texto");
+    expect(afterList.some((r) => r.request.deleteParagraphBullets)).toBe(true);
+
+    // A plain paragraph never had bullets, so issuing the request would be dead weight on every
+    // ordinary insert.
+    const paragraph = doc.blocks.find((b) => b.kind === "paragraph")!;
+    const afterParagraph = insertParagraphAfter(paragraph, "texto");
+    expect(afterParagraph.some((r) => r.request.deleteParagraphBullets)).toBe(false);
   });
 
   it("skips the delete when the range is empty", () => {

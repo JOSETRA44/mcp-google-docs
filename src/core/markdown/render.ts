@@ -54,8 +54,16 @@ function withImages(block: Block, document: ParsedDocument): string {
   return text.split(OBJECT_PLACEHOLDER).join("");
 }
 
-function renderBlock(block: Block, document: ParsedDocument, mode: RenderMode): string | null {
-  const marker = mode === "addressed" ? `{#${block.id}} ` : "";
+function renderBlock(
+  block: Block,
+  document: ParsedDocument,
+  mode: RenderMode,
+  ordinal = 1,
+): string | null {
+  // Unresolved suggestions are surfaced in addressed mode because an agent editing a block needs
+  // to know whether what it is reading is committed text or somebody's pending proposal.
+  const suggestion = mode === "addressed" && block.hasSuggestions ? "[suggested] " : "";
+  const marker = mode === "addressed" ? `{#${block.id}} ${suggestion}` : "";
   const text = withImages(block, document);
 
   switch (block.kind) {
@@ -65,7 +73,9 @@ function renderBlock(block: Block, document: ParsedDocument, mode: RenderMode): 
     }
     case "listItem": {
       const indent = "  ".repeat(block.listDepth ?? 0);
-      const bullet = block.ordered ? "1." : "-";
+      // Real numbers rather than the Markdown convention of repeating "1.": the agent should see
+      // the same numbering the user sees, since it may be asked about "the third step".
+      const bullet = block.ordered ? `${ordinal}.` : "-";
       return `${indent}${bullet} ${marker}${text}`;
     }
     case "sectionBreak":
@@ -167,6 +177,10 @@ export function renderMarkdown(document: ParsedDocument, options: RenderOptions 
   const out: string[] = [];
   let lastTabOrdinal: number | undefined;
   let lastSegmentId: string | undefined;
+  /** Counters per nesting depth, so numbering restarts when a list ends or nests deeper. */
+  let counters: number[] = [];
+  /** Whether the previous emitted item was a list item, to control blank-line separation. */
+  let previousWasListItem = false;
 
   for (const item of items) {
     if (document.tabs.length > 1 && item.tabOrdinal !== lastTabOrdinal) {
@@ -180,15 +194,35 @@ export function renderMarkdown(document: ParsedDocument, options: RenderOptions 
       lastSegmentId = item.segmentId;
     }
 
+    const isListItem = item.type === "block" && item.block.kind === "listItem";
+
+    let ordinal = 1;
+    if (isListItem) {
+      const depth = item.block.listDepth ?? 0;
+      counters.length = depth + 1;
+      counters[depth] = (counters[depth] ?? 0) + 1;
+      ordinal = counters[depth]!;
+    } else {
+      counters = [];
+    }
+
     const rendered =
       item.type === "block"
-        ? renderBlock(item.block, document, mode)
+        ? renderBlock(item.block, document, mode, ordinal)
         : renderTable(item.table, document, mode);
 
-    if (rendered !== null && rendered.length > 0) out.push(rendered);
+    if (rendered !== null && rendered.length > 0) {
+      // Consecutive list items are separated by a single newline; a blank line between them
+      // reads as a loose list and, more importantly, triples the vertical space of every list an
+      // agent has to scan.
+      const separator = isListItem && previousWasListItem ? "\n" : "\n\n";
+      if (out.length > 0) out.push(separator);
+      out.push(rendered);
+      previousWasListItem = isListItem;
+    }
   }
 
-  return out.join("\n\n").trim();
+  return out.join("").trim();
 }
 
 /** A compact heading-only view, for orienting in a long document without reading it. */

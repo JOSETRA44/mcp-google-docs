@@ -135,9 +135,23 @@ comment body.
 
 The Docs API added truly anchored comments in Developer Preview. Those are detected at runtime —
 lazily probed, cached, with a negative result expiring after a day — so if the account gains
-enrollment the feature starts working with no reconfiguration. Suggestion mode (`mode: "suggest"`)
-works the same way, and deliberately has **no fallback**: an agent that asked for a reviewable
-suggestion must never silently receive a committed edit instead.
+enrollment the feature starts working with no reconfiguration.
+
+### Suggestion mode, and why it is probed rather than attempted
+
+`mode: "suggest"` has **no fallback**: an agent that asked for a reviewable proposal must never
+silently receive a committed edit instead.
+
+Enforcing that took more than error handling, because **Google does not reject
+`writeControl.writeMode` when the account lacks preview access — it silently drops the field and
+commits the write.** Detecting the capability by attempting it and catching the failure therefore
+never fires: there is no failure. The caller is told it succeeded, believes it made a suggestion,
+and has changed the document.
+
+So the capability is established *before* the user's document is touched, by writing a single word
+in suggest mode into a throwaway document that is created and deleted for the purpose, then
+checking whether Docs recorded it as a suggested insertion. That runs at most once and the answer
+is cached. Where a capability fails loudly, the cheaper attempt-and-catch path is still used.
 
 ## Development
 

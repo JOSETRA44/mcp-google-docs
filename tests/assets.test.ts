@@ -1,10 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   ImageValidationError,
   readImageInfo,
   validateImage,
 } from "../src/core/assets/image-info.js";
-import { indicatesMissingPreview } from "../src/google/capabilities.js";
+import {
+  getCached,
+  indicatesMissingPreview,
+  record,
+  resetCapabilityCache,
+} from "../src/google/capabilities.js";
 import { GoogleApiError } from "../src/google/errors.js";
 
 /** Build a PNG header with the given dimensions. Only the fields the parser reads are real. */
@@ -94,6 +102,41 @@ describe("image validation", () => {
   it("rejects a file over 50 MB", () => {
     const big = Buffer.concat([pngHeader(10, 10), Buffer.alloc(51 * 1024 * 1024)]);
     expect(() => validateImage(big, "big.png")).toThrow(/50 MB/);
+  });
+});
+
+describe("capability cache", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gdocs-cap-"));
+  const original = process.env.GDOCS_NATIVE_HOME;
+
+  beforeEach(() => {
+    process.env.GDOCS_NATIVE_HOME = mkdtempSync(join(tmpdir(), "gdocs-cap-"));
+    resetCapabilityCache();
+  });
+  afterAll(() => {
+    if (original === undefined) delete process.env.GDOCS_NATIVE_HOME;
+    else process.env.GDOCS_NATIVE_HOME = original;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns undefined for a capability never checked", async () => {
+    expect(await getCached("suggestMode")).toBeUndefined();
+  });
+
+  it("remembers a positive result", async () => {
+    await record("suggestMode", true);
+    expect(await getCached("suggestMode")).toBe(true);
+  });
+
+  it("expires a negative result so enrollment gained later is noticed", async () => {
+    await record("suggestMode", false);
+    expect(await getCached("suggestMode")).toBe(false);
+
+    // A permanently cached "no" would hide the feature from a user who joined the preview
+    // program between two runs, with no way to discover it short of deleting the cache file.
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+    expect(await getCached("suggestMode")).toBeUndefined();
+    vi.useRealTimers();
   });
 });
 

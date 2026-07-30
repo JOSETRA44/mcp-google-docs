@@ -247,14 +247,25 @@ export function compileMarkdown(blocks: MdBlock[], position: DocRange): Compiled
     }
 
     if (block.quote) {
+      // Indentation alone is not enough: an indented paragraph following a list renders as a
+      // continuation of the last list item, both in the editor and in Google's own Markdown
+      // export. The left border is what makes it unambiguously a quote.
       requests.push(
         at(
           base + start,
           {
             updateParagraphStyle: {
               range: toApiRange(styleRange),
-              paragraphStyle: { indentStart: { magnitude: 36, unit: "PT" } },
-              fields: "indentStart",
+              paragraphStyle: {
+                indentStart: { magnitude: 36, unit: "PT" },
+                borderLeft: {
+                  color: { color: { rgbColor: { red: 0.6, green: 0.6, blue: 0.6 } } },
+                  width: { magnitude: 3, unit: "PT" },
+                  padding: { magnitude: 8, unit: "PT" },
+                  dashStyle: "SOLID",
+                },
+              },
+              fields: "indentStart,borderLeft",
             },
           },
           PHASE_STYLE,

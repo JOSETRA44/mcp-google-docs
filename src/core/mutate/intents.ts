@@ -1,6 +1,6 @@
 import type { docs_v1 } from "googleapis";
 import type { Block, DocRange } from "../ast/types.js";
-import { at, toApiLocation, toApiRange, type PlannedRequest } from "./plan.js";
+import { at, PHASE_STYLE, toApiLocation, toApiRange, type PlannedRequest } from "./plan.js";
 
 /**
  * Semantic operations expressed as planned requests.
@@ -58,35 +58,84 @@ export function insertAt(position: DocRange, text: string): PlannedRequest[] {
 }
 
 /**
- * Insert a new paragraph after a block.
+ * Reset a freshly inserted paragraph to plain body text.
  *
- * The text is prefixed with a newline rather than suffixed, and inserted at the *end* of the
- * target block's text rather than at the start of the next one. Inserting at the next block's
- * start would place the text inside that block and make it inherit its styling — so a paragraph
- * added after a heading would itself become a heading.
+ * **Paragraph style is always inherited, whichever side you insert on.** Inserting before the
+ * target's paragraph mark puts the text inside that paragraph, and splitting it with a newline
+ * leaves *both* halves carrying the original style — so a paragraph added after a heading becomes
+ * a heading. Inserting after the mark instead puts the text at the head of the *following*
+ * paragraph and inherits that one's style. There is no position that avoids it.
+ *
+ * So inheritance is undone explicitly rather than dodged. Bullets need their own request because
+ * list membership is not part of `namedStyleType`, and is only cleared when the source block was
+ * itself a list item — issuing it otherwise would be a no-op request on every single insert.
+ */
+function normalizeInsertedParagraph(
+  range: DocRange,
+  source: Block,
+): PlannedRequest[] {
+  const requests: PlannedRequest[] = [
+    at(
+      range.startIndex,
+      {
+        updateParagraphStyle: {
+          range: toApiRange(range),
+          paragraphStyle: { namedStyleType: "NORMAL_TEXT" },
+          fields: "namedStyleType",
+        },
+      },
+      PHASE_STYLE,
+    ),
+  ];
+
+  if (source.kind === "listItem") {
+    requests.push(
+      at(range.startIndex, { deleteParagraphBullets: { range: toApiRange(range) } }, PHASE_STYLE),
+    );
+  }
+
+  return requests;
+}
+
+/**
+ * Insert a new paragraph after a block, as ordinary body text.
+ *
+ * The newline is written *before* the text so that the target block keeps its own paragraph mark
+ * and the new content becomes a paragraph of its own.
  */
 export function insertParagraphAfter(block: Block, text: string): PlannedRequest[] {
   const index = block.textRange.endIndex;
+  // After the insert, the newline occupies `index` and the text runs from `index + 1`.
+  const inserted: DocRange = {
+    startIndex: index + 1,
+    endIndex: index + 1 + text.length,
+    segmentId: block.textRange.segmentId,
+    tabId: block.textRange.tabId,
+  };
+
   return [
     at(index, {
-      insertText: {
-        location: toApiLocation(block.textRange, index),
-        text: `\n${text}`,
-      },
+      insertText: { location: toApiLocation(block.textRange, index), text: `\n${text}` },
     }),
+    ...normalizeInsertedParagraph(inserted, block),
   ];
 }
 
-/** Insert a new paragraph before a block. */
+/** Insert a new paragraph before a block, as ordinary body text. */
 export function insertParagraphBefore(block: Block, text: string): PlannedRequest[] {
   const index = block.range.startIndex;
+  const inserted: DocRange = {
+    startIndex: index,
+    endIndex: index + text.length,
+    segmentId: block.range.segmentId,
+    tabId: block.range.tabId,
+  };
+
   return [
     at(index, {
-      insertText: {
-        location: toApiLocation(block.range, index),
-        text: `${text}\n`,
-      },
+      insertText: { location: toApiLocation(block.range, index), text: `${text}\n` },
     }),
+    ...normalizeInsertedParagraph(inserted, block),
   ];
 }
 

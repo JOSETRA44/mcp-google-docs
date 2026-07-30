@@ -67,6 +67,11 @@ export async function record(capability: Capability, available: boolean): Promis
   await save(cache);
 }
 
+/** Drop the in-process cache so the next read comes from disk. Used by tests. */
+export function resetCapabilityCache(): void {
+  memory = undefined;
+}
+
 /** Whether a failure means "this account is not enrolled" rather than "this call was wrong". */
 export function indicatesMissingPreview(error: unknown): boolean {
   if (!(error instanceof GoogleApiError)) return false;
@@ -78,6 +83,50 @@ export function indicatesMissingPreview(error: unknown): boolean {
     /unknown name|invalid json payload|not supported|cannot find field/i.test(error.message)
   );
 }
+
+/**
+ * Determine whether `writeControl.writeMode: SUGGEST` genuinely produces tracked suggestions.
+ *
+ * This cannot be learned by attempting it on the user's document and watching for an error,
+ * because **Google does not error**. An account without Developer Preview access has the field
+ * silently dropped and the edit committed as an ordinary write. The caller is told it succeeded,
+ * believes it made a reviewable proposal, and has in fact changed the document irreversibly.
+ *
+ * So the probe runs against a throwaway document that is created and deleted here: write a word
+ * in suggest mode, read it back, and check whether Docs recorded it as a suggested insertion. The
+ * user's own documents are never involved, and the answer is cached so this happens at most once.
+ */
+async function probeSuggestMode(): Promise<boolean> {
+  const { createDocument, getDocument, batchUpdate } = await import("./docs.js");
+  const { deleteFile } = await import("./drive.js");
+
+  let probeDocumentId: string | undefined;
+  try {
+    probeDocumentId = await createDocument("gdocs-native capability probe (safe to delete)");
+    const before = await getDocument(probeDocumentId);
+
+    await batchUpdate(
+      probeDocumentId,
+      [{ insertText: { location: { index: 1 }, text: "probe" } }],
+      { targetRevisionId: before.revisionId!, mode: "suggest" },
+    );
+
+    const after = await getDocument(probeDocumentId);
+    // A genuine suggestion carries insertion ids on the text run. A committed write has none.
+    return JSON.stringify(after.body ?? {}).includes("suggestedInsertionIds");
+  } catch {
+    // A probe that cannot run is treated as "unavailable": refusing is always safer than
+    // assuming a capability whose absence silently commits edits.
+    return false;
+  } finally {
+    if (probeDocumentId) await deleteFile(probeDocumentId);
+  }
+}
+
+/** Probes, keyed by capability. Only capabilities that fail silently need one. */
+const PROBES: Partial<Record<Capability, () => Promise<boolean>>> = {
+  suggestMode: probeSuggestMode,
+};
 
 export class PreviewUnavailableError extends Error {
   constructor(feature: string) {
@@ -103,7 +152,15 @@ export async function withCapability<T>(
   operation: () => Promise<T>,
   fallback?: () => Promise<T>,
 ): Promise<T> {
-  const known = await getCached(capability);
+  let known = await getCached(capability);
+
+  // Where a capability fails *silently*, the answer must be established before the operation
+  // runs — learning from the operation's own failure only works when there is a failure.
+  const probe = PROBES[capability];
+  if (known === undefined && probe) {
+    known = await probe();
+    await record(capability, known);
+  }
 
   if (known === false) {
     if (fallback) return fallback();
