@@ -46,6 +46,48 @@ export async function exportMarkdown(documentId: string): Promise<string> {
   );
 }
 
+/** Formats a Google Doc can be exported to, with the extension each one implies. */
+export const EXPORT_FORMATS = {
+  pdf: { mimeType: "application/pdf", extension: "pdf" },
+  docx: {
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: "docx",
+  },
+  odt: { mimeType: "application/vnd.oasis.opendocument.text", extension: "odt" },
+  rtf: { mimeType: "application/rtf", extension: "rtf" },
+  txt: { mimeType: "text/plain", extension: "txt" },
+  html: { mimeType: "text/html", extension: "html" },
+  epub: { mimeType: "application/epub+zip", extension: "epub" },
+  markdown: { mimeType: "text/markdown", extension: "md" },
+} as const;
+
+export type ExportFormat = keyof typeof EXPORT_FORMATS;
+
+/**
+ * Export a document to bytes in the requested format.
+ *
+ * Binary-safe: the response is requested as an arraybuffer rather than text, because a PDF or
+ * .docx run through a string round trip is silently corrupted — the damage only shows when someone
+ * tries to open the file.
+ *
+ * Google caps exports at 10 MB.
+ */
+export async function exportDocument(documentId: string, format: ExportFormat): Promise<Buffer> {
+  const { drive } = await getGoogleClients();
+  const { mimeType } = EXPORT_FORMATS[format];
+
+  return withRetry(
+    async () => {
+      const response = await drive.files.export(
+        { fileId: documentId, mimeType },
+        { responseType: "arraybuffer" },
+      );
+      return Buffer.from(response.data as unknown as ArrayBuffer);
+    },
+    `Could not export document ${documentId} as ${format}`,
+  );
+}
+
 /** Look up a single document's metadata. */
 export async function getDocumentMetadata(documentId: string): Promise<DocumentSummary> {
   const { drive } = await getGoogleClients();
