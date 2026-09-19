@@ -1,6 +1,16 @@
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { dirname, extname, join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { exportMarkdown, findDocuments, getDocumentMetadata, listRevisions } from "../google/drive.js";
+import {
+  EXPORT_FORMATS,
+  exportDocument,
+  exportMarkdown,
+  findDocuments,
+  getDocumentMetadata,
+  listRevisions,
+} from "../google/drive.js";
+import { at, type PlannedRequest } from "../core/mutate/plan.js";
 import { createDocument } from "../google/docs.js";
 import { loadDocument } from "../core/document.js";
 import { renderMarkdown, renderOutline } from "../core/markdown/render.js";
@@ -44,6 +54,21 @@ export function parseDocumentId(input: string): string {
   );
 }
 
+/**
+ * Behaviour hints attached to every tool.
+ *
+ * Clients use these to decide what needs confirmation. A tool with no annotation is treated
+ * conservatively — as if it might destroy something — so leaving reads unannotated makes an agent
+ * hesitate before merely *looking* at a document, which reads to the user as the tool not working.
+ *
+ * `openWorldHint` is true throughout: every one of these talks to Google, so none of them is a
+ * closed, predictable computation.
+ */
+const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
+const MUTATES = { readOnlyHint: false, destructiveHint: false, openWorldHint: true } as const;
+/** Deletion removes content outright; the mutation log records the revision to restore from. */
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, openWorldHint: true } as const;
+
 const documentField = z.string().describe("Document ID or Google Docs URL");
 const modeField = z
   .enum(["direct", "suggest"])
@@ -66,8 +91,64 @@ function describeOutcome(outcome: MutationOutcome, summary: string): string {
   return lines.join("\n");
 }
 
+/**
+ * Server-level instructions, surfaced to the client alongside the tool list.
+ *
+ * Tool descriptions answer "what does this one do"; they cannot answer "what is this server for
+ * and when should I reach for it". Without that, a model looking at seventeen `doc_*` tools has no
+ * reason to prefer them over asking the user to paste text — which is exactly the failure mode
+ * this block exists to prevent. Keep it short: it is in context for the whole session.
+ */
+const INSTRUCTIONS = `
+These tools read and edit the user's REAL Google Docs, live. Reach for them whenever a Google Doc,
+a docs.google.com URL, "my document", a draft, thesis, report or essay comes up — including when
+the user only pastes a link. Never ask the user to paste a document's text when you can read it.
+
+## Handles, not character positions
+
+Google's own API addresses documents by absolute character indices that shift on every edit. This
+server hides that completely: there is no index anywhere in these schemas. Instead each block
+carries a short content-derived handle:
+
+    ## {#030d} Results
+    {#c0c0} This paragraph has bold and italic.
+
+A handle stays valid when the document grows above it or a collaborator edits elsewhere. It changes
+only when that block's own text changes — so a stale handle means "read again", not "something
+broke".
+
+## Workflow
+
+1. doc_outline — headings only. On a long document this is a few hundred tokens instead of tens of
+   thousands, and usually enough to decide what to read.
+2. doc_read with format:"addressed" — BEFORE editing. Every block comes back prefixed with its
+   handle, and those handles are what the write tools take.
+   Use format:"clean" when you only need the prose.
+3. Edit by passing block_id. Pass exactly one target per call: block_id, find, heading or anchor.
+
+Use doc_write_markdown for anything substantial — headings, lists, tables, links and emphasis all
+become real Docs formatting. doc_insert is for a single plain paragraph.
+
+## Refusals are states to handle, not errors to retry
+
+- "appears N times" — the server will not guess which you meant. Pick one of the returned handles.
+- "No block with id …" — that block was edited, so its handle changed. Read addressed again.
+- "this file is an uploaded Office document" — a .docx cannot be edited; doc_convert makes a
+  native copy and leaves the original alone.
+
+## Care
+
+You are editing something a person is often graded or judged on. Read before you rewrite. Match the
+document's existing language and citation style. Never invent a citation or statistic to fill a
+gap — say so instead. After a significant edit, tell the user the "revision before" value: it is
+their restore point in Drive's version history.
+`.trim();
+
 export function createServer(): McpServer {
-  const server = new McpServer({ name: "gdocs-native", version: "0.1.0" });
+  const server = new McpServer(
+    { name: "gdocs-native", version: "0.3.0" },
+    { instructions: INSTRUCTIONS },
+  );
 
   /* ---------------------------------------------------------------------- */
   /* Discovery                                                               */
@@ -76,6 +157,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_list",
     {
+      annotations: READ_ONLY,
       title: "List Google Docs",
       description:
         "Find the user's Google Docs by name, most recently modified first. Use this to turn a " +
@@ -101,6 +183,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_create",
     {
+      annotations: MUTATES,
       title: "Create a Google Doc",
       description: "Create a new empty Google Doc and return its ID and URL.",
       inputSchema: { title: z.string().min(1).describe("Title for the new document") },
@@ -116,6 +199,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_convert",
     {
+      annotations: MUTATES,
       title: "Convert an uploaded file to a Google Doc",
       description:
         "Convert a .docx, .doc, .odt, .rtf, .txt, .md or .html file in Drive into a native " +
@@ -146,6 +230,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_read",
     {
+      annotations: READ_ONLY,
       title: "Read a Google Doc",
       description:
         "Read a document as Markdown. Use format 'addressed' before editing: it prefixes every " +
@@ -186,6 +271,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_outline",
     {
+      annotations: READ_ONLY,
       title: "Outline a Google Doc",
       description:
         "List a document's headings with their block handles. The cheapest way to orient in a " +
@@ -201,6 +287,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_search",
     {
+      annotations: READ_ONLY,
       title: "Search inside a Google Doc",
       description:
         "Find every occurrence of a phrase in a document and return each with its block handle " +
@@ -228,6 +315,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_history",
     {
+      annotations: READ_ONLY,
       title: "List document revisions",
       description: "List stored revisions of a document with who last modified each.",
       inputSchema: {
@@ -255,6 +343,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_replace",
     {
+      annotations: MUTATES,
       title: "Replace text in a Google Doc",
       description:
         "Replace a block's text, or a phrase within it, with new text. Target it with a block " +
@@ -298,6 +387,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_insert",
     {
+      annotations: MUTATES,
       title: "Insert text into a Google Doc",
       description:
         "Insert a new paragraph at the start or end of a document, or immediately before or " +
@@ -358,6 +448,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_delete",
     {
+      annotations: DESTRUCTIVE,
       title: "Delete content from a Google Doc",
       description:
         "Delete an entire block, or just a matched phrase within it. Deleting a block removes " +
@@ -399,6 +490,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_format",
     {
+      annotations: MUTATES,
       title: "Format text in a Google Doc",
       description:
         "Apply character formatting — bold, italic, underline, strikethrough, size, link — to a " +
@@ -447,6 +539,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_style",
     {
+      annotations: MUTATES,
       title: "Change a block's paragraph style",
       description:
         "Turn a block into a heading, title, or normal text, or convert blocks into a bulleted " +
@@ -496,6 +589,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_write_markdown",
     {
+      annotations: MUTATES,
       title: "Write Markdown into a Google Doc",
       description:
         "Insert a formatted section written in Markdown — headings, bold and italic, links, " +
@@ -540,6 +634,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_insert_table",
     {
+      annotations: MUTATES,
       title: "Insert a table into a Google Doc",
       description:
         "Insert an empty table with the given dimensions at the end of the document or after a " +
@@ -584,6 +679,228 @@ export function createServer(): McpServer {
     }),
   );
 
+  server.registerTool(
+    "doc_export",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: true },
+      title: "Download a Google Doc as a file",
+      description:
+        "Download a document to a local file as PDF, Word (.docx), OpenDocument, RTF, plain text, " +
+        "HTML, EPUB or Markdown. Use this when the user wants a copy they can send, print, submit " +
+        "or archive. Google caps exports at 10 MB.",
+      inputSchema: {
+        document: documentField,
+        format: z
+          .enum(["pdf", "docx", "odt", "rtf", "txt", "html", "epub", "markdown"])
+          .default("pdf")
+          .describe("Output format"),
+        output_path: z
+          .string()
+          .optional()
+          .describe(
+            "Where to write the file. A directory saves it under the document's own name; omit " +
+              "entirely to save into the current working directory.",
+          ),
+      },
+    },
+    guard(async ({ document, format, output_path }) => {
+      const documentId = parseDocumentId(document);
+      const [bytes, meta] = await Promise.all([
+        exportDocument(documentId, format),
+        getDocumentMetadata(documentId),
+      ]);
+
+      const { extension } = EXPORT_FORMATS[format];
+      // Strip characters Windows rejects in filenames, so a document titled "Q3: results?" still
+      // saves rather than failing on a path the user never chose.
+      const safeName = meta.name.replace(/[<>:"/\\|?*]/g, "-").trim();
+
+      let target = output_path ?? process.cwd();
+      const looksLikeDirectory =
+        !extname(target) || (await stat(target).then((s) => s.isDirectory()).catch(() => false));
+      if (looksLikeDirectory) target = join(target, `${safeName}.${extension}`);
+
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, bytes);
+
+      return textResult(
+        `Saved "${meta.name}" as ${format.toUpperCase()} (${(bytes.byteLength / 1024).toFixed(0)} KB)\n` +
+          `path: ${resolve(target)}`,
+      );
+    }),
+  );
+
+  server.registerTool(
+    "doc_stats",
+    {
+      annotations: READ_ONLY,
+      title: "Get statistics for a Google Doc",
+      description:
+        "Count words, characters, paragraphs, headings, tables and images in a document, with an " +
+        "estimated reading time. Use this to answer questions about length or to check a piece " +
+        "against a word limit.",
+      inputSchema: { document: documentField },
+    },
+    guard(async ({ document }) => {
+      const parsed = await loadDocument(parseDocumentId(document));
+      const body = parsed.blocks.filter((b) => b.range.segmentId === "");
+
+      const words = body.reduce(
+        (total, block) => total + (block.text.trim() ? block.text.trim().split(/\s+/).length : 0),
+        0,
+      );
+      const characters = body.reduce((total, block) => total + block.text.length, 0);
+      const headings = body.filter((b) => b.kind === "heading").length;
+      const paragraphs = body.filter((b) => b.kind === "paragraph" && b.text.trim()).length;
+      const listItems = body.filter((b) => b.kind === "listItem").length;
+      const images = body.reduce((total, b) => total + (b.inlineObjectRefs?.length ?? 0), 0);
+      // 200 words per minute is the usual figure for silent reading of prose.
+      const minutes = Math.max(1, Math.round(words / 200));
+
+      return textResult(
+        [
+          `"${parsed.title}"`,
+          ``,
+          `words:       ${words.toLocaleString()}`,
+          `characters:  ${characters.toLocaleString()}`,
+          `paragraphs:  ${paragraphs}`,
+          `list items:  ${listItems}`,
+          `headings:    ${headings}`,
+          `tables:      ${parsed.tables.length}`,
+          `images:      ${images}`,
+          `tabs:        ${parsed.tabs.length}`,
+          ``,
+          `reading time: about ${minutes} minute${minutes === 1 ? "" : "s"}`,
+        ].join("\n"),
+      );
+    }),
+  );
+
+  server.registerTool(
+    "doc_replace_all",
+    {
+      annotations: MUTATES,
+      title: "Replace every occurrence of a phrase",
+      description:
+        "Replace every occurrence of a phrase throughout a document in one pass — renaming a term, " +
+        "fixing a misspelling, updating a year. Use doc_replace instead when only one specific " +
+        "occurrence should change. Reports how many were replaced.",
+      inputSchema: {
+        document: documentField,
+        find: z.string().min(1).describe("Text to find"),
+        replacement: z.string().describe("Replacement text; empty string deletes the matches"),
+        match_case: z.boolean().default(true).describe("Match capitalisation exactly"),
+        mode: modeField,
+      },
+    },
+    guard(async ({ document, find, replacement, match_case, mode }) => {
+      const documentId = parseDocumentId(document);
+      let expected = 0;
+
+      const outcome = await mutate(
+        documentId,
+        (doc) => {
+          expected = findTextMatches(doc, find).length;
+          if (expected === 0) return [];
+          // `replaceAllText` is one native request rather than N delete/insert pairs — and unlike
+          // the others it applies across every tab, which is what "throughout the document" means.
+          return [
+            at(0, {
+              replaceAllText: {
+                containsText: { text: find, matchCase: match_case },
+                replaceText: replacement,
+              },
+            }),
+          ];
+        },
+        { mode, description: `replace all "${find}" in ${documentId}` },
+      );
+
+      if (outcome.requestCount === 0) {
+        return textResult(`No occurrences of "${find}" — nothing changed.`);
+      }
+
+      const reported = outcome.replies[0]?.replaceAllText?.occurrencesChanged ?? expected;
+      return textResult(
+        describeOutcome(outcome, `Replaced ${reported} occurrence(s) of "${find}".`),
+      );
+    }),
+  );
+
+  server.registerTool(
+    "doc_table_write",
+    {
+      annotations: MUTATES,
+      title: "Fill a table in a Google Doc",
+      description:
+        "Write rows of values into an existing table, addressing cells by row and column rather " +
+        "than by handle. Use this after doc_insert_table, or to update figures in a table that is " +
+        "already there. Get the table's id (like t1) from an addressed read.",
+      inputSchema: {
+        document: documentField,
+        table_id: z.string().describe("Table id from an addressed read, e.g. 't1'"),
+        rows: z
+          .array(z.array(z.string()))
+          .min(1)
+          .describe(
+            "Rows of cell text, outer array is rows. Use an empty string to leave a cell alone; " +
+              "extra rows or columns beyond the table's size are ignored.",
+          ),
+        start_row: z.number().int().min(0).default(0).describe("First row to write into, 0-based"),
+        mode: modeField,
+      },
+    },
+    guard(async ({ document, table_id, rows, start_row, mode }) => {
+      const documentId = parseDocumentId(document);
+      let written = 0;
+
+      const outcome = await mutate(
+        documentId,
+        (doc) => {
+          const table = doc.tables.find((t) => t.id === table_id);
+          if (!table) {
+            const available = doc.tables.map((t) => `${t.id} (${t.rows}x${t.columns})`);
+            throw new Error(
+              `No table "${table_id}" in this document.` +
+                (available.length
+                  ? ` Available: ${available.join(", ")}.`
+                  : " This document has no tables."),
+            );
+          }
+
+          const byId = new Map(doc.blocks.map((b) => [b.id, b]));
+          const requests: PlannedRequest[] = [];
+          written = 0;
+
+          // Collected first and applied in descending index order, so filling one cell never
+          // shifts a cell that has not been written yet.
+          const edits: { block: (typeof doc.blocks)[number]; text: string }[] = [];
+
+          rows.forEach((row, rowOffset) => {
+            const tableRow = table.cells[start_row + rowOffset];
+            if (!tableRow) return;
+            row.forEach((text, column) => {
+              if (text === "") return;
+              const cell = tableRow[column];
+              const firstBlockId = cell?.blocks[0];
+              const block = firstBlockId ? byId.get(firstBlockId) : undefined;
+              if (block) edits.push({ block, text });
+            });
+          });
+
+          for (const edit of edits) {
+            requests.push(...replaceRange(edit.block.textRange, edit.text));
+            written++;
+          }
+          return requests;
+        },
+        { mode, description: `write table ${table_id} in ${documentId}` },
+      );
+
+      return textResult(describeOutcome(outcome, `Wrote ${written} cell(s) into table ${table_id}.`));
+    }),
+  );
+
   /* ---------------------------------------------------------------------- */
   /* Assets                                                                  */
   /* ---------------------------------------------------------------------- */
@@ -591,6 +908,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_insert_image",
     {
+      annotations: MUTATES,
       title: "Insert an image into a Google Doc",
       description:
         "Insert an image from a local file path, a public URL, or a file already in the user's " +
@@ -667,6 +985,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_comments_list",
     {
+      annotations: READ_ONLY,
       title: "List comments on a Google Doc",
       description:
         "Read the comment threads on a document, including replies and the text each refers to. " +
@@ -705,6 +1024,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_comment",
     {
+      annotations: MUTATES,
       title: "Comment on a Google Doc",
       description:
         "Add a new comment to a document. Note that comments created through the API attach to " +
@@ -724,6 +1044,7 @@ export function createServer(): McpServer {
   server.registerTool(
     "doc_comment_reply",
     {
+      annotations: MUTATES,
       title: "Reply to a comment on a Google Doc",
       description:
         "Reply to an existing comment thread, optionally resolving or reopening it. Get thread " +

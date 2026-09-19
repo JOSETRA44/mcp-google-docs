@@ -25,7 +25,7 @@ import { credentialsPath, ensureStateDir, stateDir } from "./config/paths.js";
 const program = new Command()
   .name("gdocs-native")
   .description("Semantic MCP server for Google Docs — edit by intent, not by index")
-  .version("0.1.0");
+  .version("0.3.0");
 
 program
   .command("auth")
