@@ -49,6 +49,60 @@ Google will warn that the app is unverified. That is expected for a personal OAu
 
 </details>
 
+### Or let your agent install it
+
+If you're already talking to a coding agent, paste this and it will do the whole setup itself:
+
+````text
+Install the gdocs-native MCP server for me, then verify it works.
+
+1. Run: npx -y gdocs-native install
+   This detects every MCP client on this machine (Claude Code, Claude Desktop, Cursor,
+   Windsurf, VS Code, Cline) and registers the server. It merges into existing config,
+   backs up first, and is safe to re-run.
+
+   If that fails, add this to my MCP client's config by hand — the key is "mcpServers"
+   in every client except VS Code, which uses "servers":
+
+   {
+     "mcpServers": {
+       "gdocs-native": { "command": "npx", "args": ["-y", "gdocs-native", "mcp"] }
+     }
+   }
+
+   Config locations:
+     Claude Code     ~/.claude.json          (better: run `claude mcp add-json`)
+     Claude Desktop  %APPDATA%\Claude\claude_desktop_config.json
+                     ~/Library/Application Support/Claude/claude_desktop_config.json (macOS)
+     Cursor          ~/.cursor/mcp.json
+     Windsurf        ~/.codeium/windsurf/mcp_config.json
+     VS Code         %APPDATA%\Code\User\mcp.json  ("servers" key)
+     Cline           %APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json
+
+2. Run: npx -y gdocs-native doctor
+   Every line should say "ok". If it reports missing OAuth credentials, walk me through
+   creating a Desktop-app OAuth client in Google Cloud Console and enabling BOTH the
+   Google Docs API and the Google Drive API — Drive alone signs in fine and then fails on
+   the first edit. Then run: npx -y gdocs-native auth --credentials <path-to-downloaded.json>
+
+3. Install the usage skill: npx -y skills add JOSETRA44/mcp-google-docs
+
+4. Tell me to restart this client, and afterwards confirm you can see the doc_* tools by
+   listing my Google Docs.
+````
+
+### Teach your agent to use it well (recommended)
+
+```bash
+npx skills add JOSETRA44/mcp-google-docs
+```
+
+Installs a skill into Claude Code, Cursor, Codex, Windsurf and 70+ other agents that teaches the
+workflow — orient with the outline, read *addressed*, edit by handle — plus how to recover from the
+refusals the server deliberately produces instead of guessing. Without it agents still work, but
+they tend to read the whole document when the outline would do, and to address blocks by quoting
+text where a handle would be unambiguous.
+
 Check everything at any time:
 
 ```bash
@@ -107,20 +161,74 @@ If you'd rather do it by hand, the same JSON works in every client
 | `doc_read` | Read as Markdown — `clean` for prose, `addressed` for editing |
 | `doc_outline` | Headings with handles; cheapest way to orient in a long document |
 | `doc_search` | Every occurrence of a phrase, with handles and context |
+| `doc_stats` | Word/character count, structure breakdown, reading time |
 | `doc_history` | Stored revisions and who made them |
+| `doc_export` | Download as PDF, .docx, .odt, .rtf, .txt, HTML, EPUB or Markdown |
 | `doc_replace` | Replace a block's text, or a phrase within it |
+| `doc_replace_all` | Replace every occurrence throughout the document in one pass |
 | `doc_insert` | Insert a paragraph at start/end, or before/after a block |
 | `doc_delete` | Delete a block or a matched phrase |
 | `doc_format` | Bold, italic, underline, strikethrough, size, link |
 | `doc_style` | Headings, title, body text, bulleted/numbered lists |
 | `doc_write_markdown` | Write a formatted section — headings, lists, tables, links, code |
-| `doc_insert_table` | Insert an empty table |
+| `doc_insert_table` · `doc_table_write` | Insert a table, then fill it by row and column |
 | `doc_insert_image` | Insert an image from disk, a URL, or Drive |
 | `doc_comments_list` · `doc_comment` · `doc_comment_reply` | Read and take part in comment threads |
 
 Targets are given as **one** of `block_id`, `find`, `heading`, or `anchor`. Every write tool takes
 `mode: "direct" | "suggest"` and reports the revision it started from, so any edit is traceable to
 a restore point in Drive's version history.
+
+---
+
+## Using it
+
+Just talk to your agent normally:
+
+```
+Read https://docs.google.com/document/d/YOUR_ID/edit and summarize the methodology.
+
+In my thesis draft, rewrite the paragraph that starts "Los resultados muestran"
+so it's clearer, keeping the same citations.
+
+Add a Limitations section after the Discussion heading, with three bullets.
+
+Insert the chart at C:\work\figure3.png after the paragraph about growth.
+
+What comments are open on my report? Reply to Ana's and resolve it.
+```
+
+### Ready-to-use prompt
+
+If you didn't install the skill, paste this once at the start of a session to get the same
+behaviour:
+
+```text
+You can edit my Google Docs with the gdocs-native tools. Work this way:
+
+1. Start with doc_outline to see the structure cheaply — don't read a long document
+   in full unless you need its prose.
+2. Before editing anything, call doc_read with format:"addressed". Every block comes
+   back prefixed with a handle like {#a3f1}.
+3. Edit by passing block_id with that handle. It's unambiguous and survives someone
+   else editing the document while you work. Never try to compute character positions —
+   there are none in this tool surface.
+4. Pass exactly one target per call: block_id, find, heading, or anchor.
+5. Use doc_write_markdown for anything substantial — headings, lists, tables, links and
+   emphasis all become real Docs formatting. Use doc_insert only for a single plain
+   paragraph.
+
+Expect these refusals and handle them rather than retrying:
+- "appears N times" → pick one of the returned handles, or pass occurrence.
+- "No block with id ..." → that block was edited, so its content-derived handle changed.
+  Read addressed again and use the new one.
+
+Read before you rewrite: if I ask you to fix a section, find out what it currently says
+rather than replacing it with what such a section usually says. Match the document's
+existing language and citation style. Never invent a citation or statistic to fill a gap —
+tell me instead. Tell me the "revision before" value after any significant edit so I can
+undo it from Drive's version history.
+```
 
 ---
 

@@ -30,6 +30,18 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Skills instaladas localmente por `npx skills add .` durante pruebas.
+# La fuente vive en skills/; esto es solo la copia que hace el instalador.
+.claude/skills/
+.agents/
+skills-lock.json
+
+# Respaldos que crea el instalador al escribir configuraciones de clientes MCP
+*.gdocs-native-backup
+
+# Tarballs de `npm pack`
+*.tgz
+
 # Sistema Operativo y Editores
 .DS_Store
 Thumbs.db
