@@ -1,4 +1,5 @@
 import { appendFile } from "node:fs/promises";
+import type { docs_v1 } from "googleapis";
 import type { ParsedDocument } from "../ast/types.js";
 import { loadDocument } from "../document.js";
 import { batchUpdate, type WriteMode } from "../../google/docs.js";
@@ -57,6 +58,14 @@ export interface MutationOutcome {
   attempts: number;
   /** The document as read on the successful attempt, for reporting what was changed. */
   document: ParsedDocument;
+  /**
+   * Per-request replies from Google, positionally matched to the ordered requests.
+   *
+   * Most requests reply with nothing, but a few report what they actually did — `replaceAllText`
+   * returns how many occurrences it changed, which is a number only Google can know, since the
+   * count is computed against the document *after* transformation against concurrent edits.
+   */
+  replies: docs_v1.Schema$Response[];
 }
 
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -114,6 +123,7 @@ export async function mutate(
         requestCount: 0,
         attempts: attempt,
         document,
+        replies: [],
       };
     }
 
@@ -140,6 +150,7 @@ export async function mutate(
         requestCount: planned.length,
         attempts: attempt,
         document,
+        replies: result.replies,
       };
 
       await logMutation(outcome, options.description);
